@@ -4261,7 +4261,8 @@ Non-negative `integer` values
     "include_ignored": false,
     "regex": false,
     "center_on_match": false,
-    "search_on_type": true
+    "search_on_type": true,
+    "dock": "center"
   }
 }
 ```
@@ -4309,6 +4310,18 @@ Non-negative `integer` values
 - Description: Start searching as you type in project search, without pressing Enter.
 - Setting: `search_on_type`
 - Default: `true`
+
+### Dock
+
+- Description: Where project search opens. With `left` or `right`, project search opens in a search panel in that dock, and the results stay next to the open files.
+- Setting: `dock`
+- Default: `center`
+
+**Options**
+
+1. `center` opens project search as a tab in the center pane
+2. `left` opens project search in a panel in the left dock
+3. `right` opens project search in a panel in the right dock
 
 ## Search Wrap
 

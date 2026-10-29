@@ -7,8 +7,8 @@ pub use settings::{
     CodeLens, CompletionDetailAlignment, CompletionMenuItemKind, CurrentLineHighlight, DelayMs,
     DiffViewStyle, DisplayIn, DocumentColorsRenderMode, DoubleClickInMultibuffer, GitGutterWidth,
     GoToDefinitionFallback, GoToDefinitionScrollStrategy, MinimapThumb, MinimapThumbBorder,
-    MultiCursorModifier, OpenResultsIn, ScrollBeyondLastLine, ScrollbarDiagnostics,
-    SeedQuerySetting, ShowMinimap, SnippetSortOrder,
+    MultiCursorModifier, OpenResultsIn, ProjectSearchDock, ScrollBeyondLastLine,
+    ScrollbarDiagnostics, SeedQuerySetting, ShowMinimap, SnippetSortOrder,
 };
 use settings::{RegisterSetting, RelativeLineNumbers, Settings};
 use ui::scrollbars::ShowScrollbar;
@@ -204,6 +204,8 @@ pub struct SearchSettings {
     pub center_on_match: bool,
     /// Start searching as you type in project search, without pressing Enter.
     pub search_on_type: bool,
+    /// Where project search opens.
+    pub dock: ProjectSearchDock,
 }
 
 impl EditorSettings {
@@ -311,6 +313,7 @@ impl Settings for EditorSettings {
                 regex: search.regex.unwrap(),
                 center_on_match: search.center_on_match.unwrap(),
                 search_on_type: search.search_on_type.unwrap(),
+                dock: search.dock.unwrap(),
             },
             auto_signature_help: editor.auto_signature_help.unwrap(),
             language_detection: editor.language_detection.unwrap(),

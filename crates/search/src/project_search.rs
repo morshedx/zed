@@ -8,10 +8,11 @@ use crate::{
         ActionButtonState, HistoryNavigationDirection, alignment_element, input_base_styles,
         render_action_button, render_text_input, should_navigate_history,
     },
+    search_panel::{self, SearchPanel},
     text_finder::TextFinder,
 };
 use anyhow::Context as _;
-use collections::HashMap;
+use collections::{HashMap, HashSet};
 use editor::{
     Anchor, Editor, EditorEvent, EditorSettings, MAX_TAB_TITLE_LEN, MultiBuffer, PathKey,
     SearchResultsStatus, SelectionEffects,
@@ -380,6 +381,8 @@ pub struct ProjectSearchView {
     regex_language: Option<Arc<Language>>,
     debounced_search: Option<Task<()>>,
     last_search_signature: Option<SearchSignature>,
+    /// Set for the search panel's search, whose results list takes the place of the results editor.
+    panel_results_focus: Option<FocusHandle>,
     _subscriptions: Vec<Subscription>,
 }
 
@@ -392,6 +395,7 @@ pub struct ProjectSearchSettings {
 pub struct ProjectSearchBar {
     active_project_search: Option<Entity<ProjectSearchView>>,
     subscription: Option<Subscription>,
+    in_panel: bool,
 }
 
 impl ProjectSearch {
@@ -427,7 +431,7 @@ impl ProjectSearch {
         }
     }
 
-    fn clone(&self, cx: &mut Context<Self>) -> Entity<Self> {
+    pub(crate) fn clone(&self, cx: &mut Context<Self>) -> Entity<Self> {
         cx.new(|cx| {
             let excerpts = self
                 .excerpts
@@ -1290,6 +1294,79 @@ impl ProjectSearchView {
         self.entity.read(cx).match_ranges.clone()
     }
 
+    /// Makes this the search panel's search: its results show in the panel's list, which has the
+    /// given focus handle, and a confirmed search keeps the focus in the query editor.
+    pub(crate) fn set_panel_results_focus(&mut self, focus_handle: FocusHandle) {
+        self.panel_results_focus = Some(focus_handle);
+    }
+
+    pub(crate) fn query_editor_focus_handle(&self, cx: &App) -> FocusHandle {
+        self.query_editor.focus_handle(cx)
+    }
+
+    pub(crate) fn active_match_index(&self) -> Option<usize> {
+        self.active_match_index
+    }
+
+    pub(crate) fn search_limit_reached(&self, cx: &App) -> bool {
+        self.entity.read(cx).search_state.limit_reached()
+    }
+
+    /// A short status for the search panel when there are no matches to list.
+    pub(crate) fn status_text(&self, cx: &App) -> Option<&'static str> {
+        let search_state = self.entity.read(cx).search_state;
+        match search_state {
+            SearchState::Idle => None,
+            SearchState::Running {
+                activity: SearchActivity::WaitingForScan,
+                ..
+            } => Some("Loading project…"),
+            _ if search_state.no_results_so_far() => Some("No results found."),
+            SearchState::Running { .. } => Some("Searching…"),
+            SearchState::Completed(_) => None,
+        }
+    }
+
+    /// Selects the match in the results editor, so that the next match, the previous match
+    /// and Replace Next continue from it.
+    pub(crate) fn select_match_at(
+        &mut self,
+        match_index: usize,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let Some(match_range) = self.entity.read(cx).match_ranges.get(match_index).cloned() else {
+            return;
+        };
+        self.results_editor.update(cx, |editor, cx| {
+            let range_to_select = editor.range_for_match(&match_range);
+            editor.change_selections(
+                SelectionEffects::no_scroll().nav_history(false),
+                window,
+                cx,
+                |selections| selections.select_ranges([range_to_select]),
+            );
+        });
+    }
+
+    fn clean_buffers_with_matches(
+        &self,
+        match_ranges: &[Range<Anchor>],
+        cx: &App,
+    ) -> HashSet<Entity<Buffer>> {
+        let excerpts = self.entity.read(cx).excerpts.read(cx);
+        let snapshot = excerpts.snapshot(cx);
+        match_ranges
+            .iter()
+            .filter_map(|range| {
+                let (buffer_snapshot, _) =
+                    snapshot.anchor_range_to_buffer_anchor_range(range.clone())?;
+                excerpts.buffer(buffer_snapshot.remote_id())
+            })
+            .filter(|buffer| !buffer.read(cx).is_dirty())
+            .collect()
+    }
+
     fn open_text_finder(
         &mut self,
         _: &OpenTextFinder,
@@ -1411,6 +1488,13 @@ impl ProjectSearchView {
             return;
         }
 
+        // The search panel shows no results editor to save, so it saves the files that it
+        // changes. Files that already had unsaved changes stay unsaved.
+        let buffers_to_save = self
+            .panel_results_focus
+            .is_some()
+            .then(|| self.clean_buffers_with_matches(&match_ranges, cx));
+
         self.results_editor.update(cx, |editor, cx| {
             editor.replace_all(
                 &mut match_ranges.iter(),
@@ -1420,6 +1504,13 @@ impl ProjectSearchView {
                 cx,
             );
         });
+
+        if let Some(buffers_to_save) = buffers_to_save.filter(|buffers| !buffers.is_empty()) {
+            let project = self.entity.read(cx).project.clone();
+            project
+                .update(cx, |project, cx| project.save_buffers(buffers_to_save, cx))
+                .detach_and_log_err(cx);
+        }
 
         self.entity.update(cx, |model, _cx| {
             model.match_ranges = match_ranges;
@@ -1660,6 +1751,7 @@ impl ProjectSearchView {
             regex_language: None,
             debounced_search: None,
             last_search_signature: None,
+            panel_results_focus: None,
             _subscriptions: subscriptions,
         };
 
@@ -1673,12 +1765,18 @@ impl ProjectSearchView {
         window: &mut Window,
         cx: &mut Context<Workspace>,
     ) {
-        let weak_workspace = cx.entity().downgrade();
-
-        let entity = cx
-            .new(|cx| ProjectSearch::new(workspace.project().clone(), weak_workspace.clone(), cx));
-        let search = cx.new(|cx| ProjectSearchView::new(weak_workspace, entity, window, cx, None));
-        workspace.add_item_to_active_pane(Box::new(search.clone()), None, true, window, cx);
+        let search = if let Some(search) = panel_search_view(workspace, window, cx) {
+            search
+        } else {
+            let weak_workspace = cx.entity().downgrade();
+            let entity = cx.new(|cx| {
+                ProjectSearch::new(workspace.project().clone(), weak_workspace.clone(), cx)
+            });
+            let search =
+                cx.new(|cx| ProjectSearchView::new(weak_workspace, entity, window, cx, None));
+            workspace.add_item_to_active_pane(Box::new(search.clone()), None, true, window, cx);
+            search
+        };
         search.update(cx, |search, cx| {
             search
                 .included_files_editor
@@ -1696,11 +1794,13 @@ impl ProjectSearchView {
         window: &mut Window,
         cx: &mut Context<Workspace>,
     ) {
-        let existing = workspace
-            .active_pane()
-            .read(cx)
-            .items()
-            .find_map(|item| item.downcast::<ProjectSearchView>());
+        let existing = panel_search_view(workspace, window, cx).or_else(|| {
+            workspace
+                .active_pane()
+                .read(cx)
+                .items()
+                .find_map(|item| item.downcast::<ProjectSearchView>())
+        });
 
         Self::existing_or_new_search(workspace, existing, action, window, cx);
     }
@@ -1754,14 +1854,15 @@ impl ProjectSearchView {
         }
     }
 
-    // Add another search tab to the workspace.
+    // Add another search tab to the workspace. The search panel has one search, which is reused.
     fn new_search(
         workspace: &mut Workspace,
         _: &workspace::NewSearch,
         window: &mut Window,
         cx: &mut Context<Workspace>,
     ) {
-        Self::existing_or_new_search(workspace, None, &DeploySearch::default(), window, cx)
+        let existing = panel_search_view(workspace, window, cx);
+        Self::existing_or_new_search(workspace, existing, &DeploySearch::default(), window, cx)
     }
 
     fn existing_or_new_search(
@@ -1949,7 +2050,7 @@ impl ProjectSearchView {
         }
     }
 
-    fn confirm_active_search(&mut self, cx: &mut Context<Self>) {
+    pub(crate) fn confirm_active_search(&mut self, cx: &mut Context<Self>) {
         let model = self.entity.read(cx);
         if model.phase == SearchPhase::Typing {
             self.search_id = model.search_id;
@@ -2206,7 +2307,12 @@ impl ProjectSearchView {
         Ok(PathMatcher::new(&queries, path_style)?)
     }
 
-    fn select_match(&mut self, direction: Direction, window: &mut Window, cx: &mut Context<Self>) {
+    pub(crate) fn select_match(
+        &mut self,
+        direction: Direction,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
         if let Some(index) = self.active_match_index {
             let match_ranges = self.entity.read(cx).match_ranges.clone();
             if match_ranges.is_empty() {
@@ -2326,8 +2432,13 @@ impl ProjectSearchView {
                 s.select_ranges([cursor..cursor])
             });
         });
-        let results_handle = self.results_editor.focus_handle(cx);
-        window.focus(&results_handle, cx);
+        window.focus(&self.results_focus_handle(cx), cx);
+    }
+
+    fn results_focus_handle(&self, cx: &App) -> FocusHandle {
+        self.panel_results_focus
+            .clone()
+            .unwrap_or_else(|| self.results_editor.focus_handle(cx))
     }
 
     fn entity_changed(&mut self, window: &mut Window, cx: &mut Context<Self>) {
@@ -2386,7 +2497,9 @@ impl ProjectSearchView {
                         });
                         editor.scroll(Point::default(), window, cx);
                     });
+                    // As in VS Code, a search in the search panel keeps the focus in its query.
                     if phase == SearchPhase::Confirmed
+                        && self.panel_results_focus.is_none()
                         && self.query_editor.focus_handle(cx).is_focused(window)
                     {
                         self.focus_results_editor(window, cx);
@@ -2528,7 +2641,7 @@ impl ProjectSearchView {
     }
 
     fn move_focus_to_results(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        if !self.results_editor.focus_handle(cx).is_focused(window)
+        if !self.results_focus_handle(cx).is_focused(window)
             && !self.entity.read(cx).match_ranges.is_empty()
         {
             cx.stop_propagation();
@@ -2618,6 +2731,15 @@ impl ProjectSearchBar {
         Self {
             active_project_search: None,
             subscription: None,
+            in_panel: false,
+        }
+    }
+
+    /// A search bar laid out for the narrow search panel, as in VS Code.
+    pub(crate) fn new_in_panel() -> Self {
+        Self {
+            in_panel: true,
+            ..Self::new()
         }
     }
 
@@ -2996,9 +3118,12 @@ impl Render for ProjectSearchBar {
 
         let container_width = window.viewport_size().width;
         let input_width = SearchInputWidth::calc_width(container_width);
+        let in_panel = self.in_panel;
 
         let input_base_styles = |panel: InputPanel| {
             input_base_styles(search.border_color_for(panel, cx), |div| match panel {
+                InputPanel::Replacement if in_panel => div.flex_1(),
+                _ if in_panel => div.w_full(),
                 InputPanel::Query | InputPanel::Replacement => div.w(input_width),
                 InputPanel::Include | InputPanel::Exclude => div.flex_grow_1(),
             })
@@ -3203,13 +3328,18 @@ impl Render for ProjectSearchBar {
                 }
             }));
 
-        let search_line = h_flex()
-            .pl_0p5()
-            .w_full()
-            .gap_2()
-            .child(expand_button)
-            .child(query_column)
-            .child(mode_column);
+        let (search_line, panel_query_column) = if in_panel {
+            (None, Some(query_column))
+        } else {
+            let search_line = h_flex()
+                .pl_0p5()
+                .w_full()
+                .gap_2()
+                .child(expand_button)
+                .child(query_column)
+                .child(mode_column);
+            (Some(search_line), None)
+        };
 
         let replace_line = search.replace_enabled.then(|| {
             let replace_column = input_base_styles(InputPanel::Replacement).child(
@@ -3222,7 +3352,7 @@ impl Render for ProjectSearchBar {
 
             let focus_handle = search.replacement_editor.read(cx).focus_handle(cx);
             let replace_actions = h_flex()
-                .min_w_64()
+                .when(!in_panel, |this| this.min_w_64())
                 .gap_1()
                 .child(render_action_button(
                     "project-search-replace-button",
@@ -3244,7 +3374,7 @@ impl Render for ProjectSearchBar {
             h_flex()
                 .w_full()
                 .gap_2()
-                .child(alignment_element())
+                .when(!in_panel, |this| this.child(alignment_element()))
                 .child(replace_column)
                 .child(replace_actions)
         });
@@ -3268,7 +3398,7 @@ impl Render for ProjectSearchBar {
                 .child(render_text_input(&search.excluded_files_editor, None, cx));
             let mode_column = h_flex()
                 .gap_1()
-                .min_w_64()
+                .when(!in_panel, |this| this.min_w_64())
                 .child(
                     IconButton::new("project-search-opened-only", IconName::FolderSearch)
                         .shape(IconButtonShape::Square)
@@ -3284,18 +3414,27 @@ impl Render for ProjectSearchBar {
                     focus_handle,
                 ));
 
-            h_flex()
-                .w_full()
-                .gap_2()
-                .child(alignment_element())
-                .child(
-                    h_flex()
-                        .w(input_width)
-                        .gap_2()
-                        .child(include)
-                        .child(exclude),
-                )
-                .child(mode_column)
+            if in_panel {
+                v_flex()
+                    .w_full()
+                    .gap_1()
+                    .child(include)
+                    .child(exclude)
+                    .child(mode_column)
+            } else {
+                h_flex()
+                    .w_full()
+                    .gap_2()
+                    .child(alignment_element())
+                    .child(
+                        h_flex()
+                            .w(input_width)
+                            .gap_2()
+                            .child(include)
+                            .child(exclude),
+                    )
+                    .child(mode_column)
+            }
         });
 
         let mut key_context = KeyContext::default();
@@ -3331,7 +3470,7 @@ impl Render for ProjectSearchBar {
                     .ml_2()
             });
 
-        v_flex()
+        let content = v_flex()
             .gap_2()
             .w_full()
             .key_context(key_context)
@@ -3374,10 +3513,71 @@ impl Render for ProjectSearchBar {
             })
             .on_action(cx.listener(Self::select_next_match))
             .on_action(cx.listener(Self::select_prev_match))
-            .on_action(cx.listener(Self::open_text_finder))
-            .child(search_line)
+            .on_action(cx.listener(Self::open_text_finder));
+
+        let Some(query_column) = panel_query_column else {
+            return content
+                .children(search_line)
+                .children(query_error_line)
+                .children(replace_line)
+                .children(filter_line)
+                .children(filter_error_line)
+                .into_any_element();
+        };
+
+        // The search panel stacks its inputs as VS Code's search view does: a toggle for the
+        // replace input beside the query, and a toggle for the file filters below.
+        let focus_handle = search.focus_handle(cx);
+        let replace_toggle = IconButton::new(
+            "project-search-replace-toggle",
+            if search.replace_enabled {
+                IconName::ChevronDown
+            } else {
+                IconName::ChevronRight
+            },
+        )
+        .shape(IconButtonShape::Square)
+        .icon_size(IconSize::Small)
+        .toggle_state(search.replace_enabled)
+        .tooltip({
+            let focus_handle = focus_handle.clone();
+            move |_window, cx| {
+                Tooltip::for_action_in("Toggle Replace", &ToggleReplace, &focus_handle, cx)
+            }
+        })
+        .on_click(cx.listener(|this, _, window, cx| {
+            this.toggle_replace(&ToggleReplace, window, cx);
+        }));
+        let filters_toggle = IconButton::new("project-search-filters-toggle", IconName::Ellipsis)
+            .shape(IconButtonShape::Square)
+            .icon_size(IconSize::Small)
+            .toggle_state(search.filters_enabled)
+            .tooltip(move |_window, cx| {
+                Tooltip::for_action_in("Toggle Filters", &ToggleFilters, &focus_handle, cx)
+            })
+            .on_click(cx.listener(|this, _, window, cx| {
+                this.toggle_filters(window, cx);
+            }));
+
+        content
+            .gap_1()
+            .child(
+                h_flex()
+                    .w_full()
+                    .gap_1()
+                    .items_start()
+                    .child(div().pt_1p5().child(replace_toggle))
+                    .child(
+                        v_flex()
+                            .flex_1()
+                            .min_w_0()
+                            .gap_1()
+                            .child(query_column)
+                            .children(replace_line),
+                    ),
+            )
             .children(query_error_line)
-            .children(replace_line)
+            .child(h_flex().w_full().justify_end().child(filters_toggle))
             .children(filter_line)
             .children(filter_error_line)
             .into_any_element()
@@ -3404,6 +3604,21 @@ impl ToolbarItemView for ProjectSearchBar {
             ToolbarItemLocation::Hidden
         }
     }
+}
+
+/// The search panel's search, when the `search.dock` setting puts project search in a dock.
+/// Reveals the search panel.
+fn panel_search_view(
+    workspace: &mut Workspace,
+    window: &mut Window,
+    cx: &mut Context<Workspace>,
+) -> Option<Entity<ProjectSearchView>> {
+    if !search_panel::is_enabled(cx) {
+        return None;
+    }
+    let panel = workspace.panel::<SearchPanel>(cx)?;
+    workspace.reveal_panel::<SearchPanel>(window, cx);
+    Some(panel.read(cx).search_view().clone())
 }
 
 fn register_workspace_action<A: Action>(

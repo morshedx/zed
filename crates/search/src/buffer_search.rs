@@ -1889,7 +1889,7 @@ mod tests {
     use language::{Buffer, Point};
     #[cfg(target_os = "macos")]
     use project::Project;
-    use settings::{SearchSettingsContent, SettingsStore};
+    use settings::{ProjectSearchDock, SearchSettingsContent, SettingsStore};
     use unindent::Unindent as _;
     use util_macros::perf;
     #[cfg(target_os = "macos")]
@@ -3983,6 +3983,7 @@ mod tests {
                 regex: false,
                 center_on_match: false,
                 search_on_type: false,
+                dock: ProjectSearchDock::Center,
             },
             cx,
         );
@@ -4047,6 +4048,7 @@ mod tests {
                 regex: false,
                 center_on_match: false,
                 search_on_type: false,
+                dock: ProjectSearchDock::Center,
             },
             cx,
         );
@@ -4086,6 +4088,7 @@ mod tests {
                 regex: false,
                 center_on_match: false,
                 search_on_type: false,
+                dock: ProjectSearchDock::Center,
             },
             cx,
         );
@@ -4616,6 +4619,7 @@ mod tests {
                         regex: Some(search_settings.regex),
                         center_on_match: Some(search_settings.center_on_match),
                         search_on_type: Some(search_settings.search_on_type),
+                        dock: Some(search_settings.dock),
                     });
                 });
             });

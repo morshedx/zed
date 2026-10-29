@@ -829,6 +829,15 @@
     "center_on_match": false,
     // Start searching as you type in project search, without pressing Enter.
     "search_on_type": true,
+    // Where project search opens. This setting can take three values:
+    //
+    // 1. As a tab in the center pane (default):
+    //    "center"
+    // 2. In a panel in the left dock:
+    //    "left"
+    // 3. In a panel in the right dock:
+    //    "right"
+    "dock": "center",
   },
   // When to populate a new search's query based on the text under the cursor.
   // This setting can take the following three values:

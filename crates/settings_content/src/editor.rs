@@ -1020,6 +1020,34 @@ pub struct SearchSettingsContent {
     pub center_on_match: Option<bool>,
     /// Start searching as you type in project search, without pressing Enter.
     pub search_on_type: Option<bool>,
+    /// Where project search opens: as a tab in the center pane, or in a panel in the left or right dock.
+    pub dock: Option<ProjectSearchDock>,
+}
+
+/// Where project search opens.
+#[derive(
+    Default,
+    Copy,
+    Clone,
+    Debug,
+    Serialize,
+    Deserialize,
+    PartialEq,
+    Eq,
+    JsonSchema,
+    MergeFrom,
+    strum::VariantArray,
+    strum::VariantNames,
+)]
+#[serde(rename_all = "snake_case")]
+pub enum ProjectSearchDock {
+    /// Open project search as a tab in the center pane.
+    #[default]
+    Center,
+    /// Open project search in a panel in the left dock.
+    Left,
+    /// Open project search in a panel in the right dock.
+    Right,
 }
 
 #[with_fallible_options]
