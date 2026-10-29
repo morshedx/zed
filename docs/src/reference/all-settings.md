@@ -2061,6 +2061,24 @@ Positive `integer` value between 1 and 32. Values outside of this range will be 
 
 `boolean` values
 
+## Activity Bar
+
+- Description: A column of buttons for the left dock's panels on the left edge of the window, as in VS Code. When it is shown, the left dock's panel buttons move there from the status bar. Its bottom has buttons for your account and for the settings.
+- Setting: `activity_bar`
+- Default:
+
+```json [settings]
+{
+  "activity_bar": {
+    "show": false
+  }
+}
+```
+
+**Options**
+
+- `show`: Whether to show the activity bar
+
 ## Status Bar
 
 - Description: Control various elements in the status bar. Note that some items in the status bar have their own settings set elsewhere.

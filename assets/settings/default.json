@@ -2036,6 +2036,13 @@
     // 2. hour24
     "hour_format": "hour12",
   },
+  // The activity bar: a column of buttons for the left dock's panels on the
+  // left edge of the window, as in VS Code.
+  "activity_bar": {
+    // Whether to show the activity bar. When it is shown, the left dock's
+    // panel buttons move there from the status bar.
+    "show": false,
+  },
   // Status bar-related settings.
   "status_bar": {
     // Whether to show the status bar.

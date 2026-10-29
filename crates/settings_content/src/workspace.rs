@@ -557,6 +557,18 @@ pub struct TabBarSettingsContent {
     pub show_pinned_tabs_in_separate_row: Option<bool>,
 }
 
+/// The activity bar: a column of buttons for the left dock's panels on the left edge of the
+/// window, as in VS Code.
+#[with_fallible_options]
+#[derive(Clone, Default, Serialize, Deserialize, JsonSchema, MergeFrom, Debug, PartialEq, Eq)]
+pub struct ActivityBarSettingsContent {
+    /// Whether to show the activity bar. When it is shown, the left dock's panel buttons move
+    /// there from the status bar.
+    ///
+    /// Default: false
+    pub show: Option<bool>,
+}
+
 #[with_fallible_options]
 #[derive(Clone, Default, Serialize, Deserialize, JsonSchema, MergeFrom, Debug, PartialEq, Eq)]
 pub struct StatusBarSettingsContent {

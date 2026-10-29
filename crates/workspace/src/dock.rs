@@ -1,6 +1,7 @@
 use crate::focus_follows_mouse::FocusFollowsMouse as _;
 use crate::persistence::model::DockData;
 use crate::status_bar::HideStatusItem;
+use crate::workspace_settings::ActivityBarSettings;
 use crate::{DraggedDock, Event, ModalLayer, Pane, WorkspaceSettings};
 use crate::{Workspace, status_bar::StatusItemView};
 use anyhow::Context as _;
@@ -388,6 +389,8 @@ struct PanelEntry {
 
 pub struct PanelButtons {
     dock: Entity<Dock>,
+    /// Lays the buttons out in a column, for the activity bar.
+    vertical: bool,
     _settings_subscription: Subscription,
 }
 
@@ -1388,9 +1391,29 @@ impl PanelButtons {
         let settings_subscription = cx.observe_global::<SettingsStore>(|_, cx| cx.notify());
         Self {
             dock,
+            vertical: false,
             _settings_subscription: settings_subscription,
         }
     }
+
+    /// Buttons in a column, for the activity bar on the left edge of the window.
+    pub fn new_vertical(dock: Entity<Dock>, cx: &mut Context<Self>) -> Self {
+        Self {
+            vertical: true,
+            ..Self::new(dock, cx)
+        }
+    }
+}
+
+// The activity bar follows VS Code's order instead of the activation priority, which also sets
+// the status bar order. Panels not listed here keep their activation priority order after these.
+const ACTIVITY_BAR_ORDER: [&str; 4] = ["ProjectPanel", "SearchPanel", "GitPanel", "DebugPanel"];
+
+fn activity_bar_rank(panel_key: &str) -> usize {
+    ACTIVITY_BAR_ORDER
+        .iter()
+        .position(|key| *key == panel_key)
+        .unwrap_or(ACTIVITY_BAR_ORDER.len())
 }
 
 impl Render for PanelButtons {
@@ -1399,18 +1422,30 @@ impl Render for PanelButtons {
         let active_index = dock.active_panel_index;
         let is_open = dock.is_open;
         let dock_position = dock.position;
+        let vertical = self.vertical;
+
+        // The activity bar shows the left dock's buttons instead of the status bar.
+        if !vertical
+            && dock_position == DockPosition::Left
+            && ActivityBarSettings::get_global(cx).show
+        {
+            return div().into_any_element();
+        }
 
         let (menu_anchor, menu_attach) = match dock.position {
+            DockPosition::Left if vertical => (Anchor::TopLeft, Anchor::TopRight),
             DockPosition::Left => (Anchor::BottomLeft, Anchor::TopLeft),
             DockPosition::Bottom | DockPosition::Right => (Anchor::BottomRight, Anchor::TopRight),
         };
 
         let dock_entity = self.dock.clone();
         let workspace = dock.workspace.clone();
-        let mut buttons: Vec<_> = dock
-            .panel_entries
-            .iter()
-            .enumerate()
+        let mut entries: Vec<_> = dock.panel_entries.iter().enumerate().collect();
+        if vertical {
+            entries.sort_by_key(|(_, entry)| activity_bar_rank(entry.panel.panel_key()));
+        }
+        let mut buttons: Vec<_> = entries
+            .into_iter()
             .filter_map(|(i, entry)| {
                 let icon = entry.panel.icon(window, cx)?;
                 let icon_tooltip = entry
@@ -1540,7 +1575,12 @@ impl Render for PanelButtons {
                             // Include active state in element ID to invalidate the cached
                             // tooltip when panel state changes (e.g., via keyboard shortcut)
                             let button = IconButton::new((name, is_active_button as u64), icon)
-                                .icon_size(IconSize::Small)
+                                .icon_size(if vertical {
+                                    IconSize::Medium
+                                } else {
+                                    IconSize::Small
+                                })
+                                .when(vertical, |this| this.size(ButtonSize::Large))
                                 .toggle_state(is_active_button)
                                 .tab_index(0isize)
                                 .aria_label(icon_tooltip)
@@ -1575,6 +1615,14 @@ impl Render for PanelButtons {
 
         let has_buttons = !buttons.is_empty();
 
+        if vertical {
+            return v_flex()
+                .gap_1()
+                .items_center()
+                .children(buttons)
+                .into_any_element();
+        }
+
         h_flex()
             .gap_1()
             .when(
@@ -1587,6 +1635,7 @@ impl Render for PanelButtons {
             .when(has_buttons && dock.position == DockPosition::Left, |this| {
                 this.child(Divider::vertical().color(DividerColor::Border))
             })
+            .into_any_element()
     }
 }
 
